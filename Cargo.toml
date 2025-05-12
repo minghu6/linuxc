@@ -5,13 +5,27 @@ edition = "2024"
 description = ""
 authors = [ "minghu6 <a19678zy@163.com>" ]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 libc = { version = "0.2", features = ["extra_traits"] }
+osimodel = { path = "../osimodel" }
+ifstructs = "0.1.1"
+ioctl = { version = "0.8", package = "ioctl-sys" }
+
+# code genenration utils
+derive_more = { version = "1.0", features = ["display", "error", "deref", "deref_mut"] }
+int-enum = "1.2"
+strum = { version = "0.27", features = ["derive"] }
+m6tobytes = { path = "../m6coll/m6tobytes" }
 
 
-[[bin]]
-name="linuxc"
-path="bin/linuxc"
+[dev-dependencies]
+# cli
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 
+# date
+chrono = "0.4"
+
+[[example]]
+name="tcp_server_r0"
+path="examples/tcp/tcp_server_r0.rs"
