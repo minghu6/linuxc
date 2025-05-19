@@ -7,7 +7,7 @@ authors = [ "minghu6 <a19678zy@163.com>" ]
 
 [dependencies]
 libc = { version = "0.2", features = ["extra_traits"] }
-osimodel = { path = "../osimodel" }
+osimodel = { path = "../osimodel", features = ["http"] }
 ifstructs = "0.1.1"
 ioctl = { version = "0.8", package = "ioctl-sys" }
 
@@ -17,6 +17,9 @@ int-enum = "1.2"
 strum = { version = "0.27", features = ["derive"] }
 m6tobytes = { path = "../m6coll/m6tobytes" }
 
+# semantics
+nonempty = { version = "0.11" }
+
 
 [dev-dependencies]
 # cli
@@ -25,6 +28,9 @@ clap_complete = "4"
 
 # date
 chrono = "0.4"
+
+# gateway discovery service
+default-net = "0.11.0"
 
 [[example]]
 name="tcp_server_r0"

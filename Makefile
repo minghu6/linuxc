@@ -4,3 +4,9 @@ build:
 
 bump-verson: build
 	cargo ws version --no-individual-tags
+
+clean-ice:
+	trash rustc-ice-2025*.txt
+
+clean:
+	rm linuxc-*

@@ -1,11 +1,10 @@
 //! Big Endianess
 
+use m6tobytes::derive_to_bits;
+use osimodel::datalink::{arp::HTypeSpec, EthType, EthTypeSpec};
+
 ////////////////////////////////////////////////////////////////////////////////
 //// Macros
-
-use osimodel::datalink::{EthType, EthTypeSpec};
-
-use crate::socket::SaFamily;
 
 macro_rules! define_unsigned_be {
     ($( {
@@ -19,6 +18,7 @@ macro_rules! define_unsigned_be {
             pub struct $struct_name($origin_type);
 
             impl $struct_name {
+                /// from from_ne
                 pub const fn new(x: $origin_type) -> Self {
                     Self::from_ne(x)
                 }
@@ -28,11 +28,11 @@ macro_rules! define_unsigned_be {
                 }
 
                 pub const fn from_le(x: $origin_type) -> Self {
-                    Self::from_ne(<$origin_type>::from_le(x))
+                    Self::new(<$origin_type>::from_le(x))
                 }
 
                 pub const fn from_be(x: $origin_type) -> Self {
-                    Self::from_ne(<$origin_type>::from_be(x))
+                    Self::new(<$origin_type>::from_be(x))
                 }
 
                 pub const fn to_ne(&self) -> $origin_type {
@@ -92,34 +92,26 @@ define_unsigned_be! {
 }
 
 #[derive(Default, Clone, Copy, Hash, PartialEq, Eq)]
-#[repr(transparent)]
-pub struct SaFamilyBe(U16Be);
-
-#[derive(Default, Clone, Copy, Hash, PartialEq, Eq)]
+#[derive_to_bits(u16)]
 #[repr(transparent)]
 pub struct EthTypeBe(U16Be);
 
-#[derive(Default, Clone, Copy, Hash, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Copy, Hash, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct HTypeBe(U16Be);
 
 ////////////////////////////////////////////////////////////////////////////////
 //// Implementations
 
-impl SaFamilyBe {
-    pub fn new(t: SaFamily) -> Self {
+impl HTypeBe {
+    pub fn new(t: HTypeSpec) -> Self {
         Self(U16Be::new(t.to_bits()))
-    }
-
-    pub fn to_family(self) -> SaFamily {
-        // If SaFamilyBe create with a valid SaFamily value
-        unsafe { SaFamily::from_bits(self.0.to_ne()) }
     }
 }
 
-impl std::fmt::Debug for SaFamilyBe {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self.to_family())
+impl From<HTypeSpec> for HTypeBe {
+    fn from(value: HTypeSpec) -> Self {
+        Self::new(value)
     }
 }
 
@@ -131,6 +123,12 @@ impl EthTypeBe {
     pub fn to_eth_type(self) -> EthTypeSpec {
         // If SaFamilyBe create with a valid SaFamily value
         unsafe { EthType::from_bits(self.0.to_ne()).into() }
+    }
+}
+
+impl From<EthTypeSpec> for EthTypeBe {
+    fn from(value: EthTypeSpec) -> Self {
+        Self::new(value)
     }
 }
 

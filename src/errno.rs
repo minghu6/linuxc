@@ -1,8 +1,6 @@
-use std::{ffi::CStr, str::FromStr};
-
 use derive_more::derive::Error;
 use int_enum::IntEnum;
-use libc::{__errno_location, strerror};
+use libc::__errno_location;
 use strum::{Display, EnumString};
 
 
@@ -16,7 +14,7 @@ pub type Result<T> = std::result::Result<T, PosixError>;
     Debug, Display, Clone, Copy, PartialEq, Eq, Hash, Error, EnumString, IntEnum
 )]
 #[strum(serialize_all = "UPPERCASE")]
-#[repr(u32)]
+#[repr(i32)]
 pub enum PosixError {
     /// Argument list too long
     E2BIG =7,
@@ -541,6 +539,6 @@ pub(crate) fn last_os_error() -> PosixError {
 
         assert!(errno > 0, "found {errno}");
 
-        PosixError::try_from(errno as u32).unwrap()
+        PosixError::try_from(errno).unwrap()
     }
 }

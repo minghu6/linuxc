@@ -1,21 +1,17 @@
 ////////////////////////////////////////////////////////////////////////////////
 //// Constants
 
-/* SIOC G(et) IF INDEX */
-// pub const SIOCGIFINDEX: u64 = 0x8933;
-// pub const SIOCGIFHWADDR: u64 = 0x8933;
 
 ////////////////////////////////////////////////////////////////////////////////
 //// Structures
 
 use std::{
     any::Any,
-    ffi::c_void,
+    ffi::{ c_void, c_int },
     os::fd::{AsRawFd, BorrowedFd},
 };
 
 use int_enum::IntEnum;
-use libc::{c_int, SIOCGIFINDEX};
 
 use crate::errno;
 
@@ -23,9 +19,13 @@ use crate::errno;
 #[repr(usize)]
 #[non_exhaustive]
 pub enum IoctlOpcode {
-    SIOCGIFINDEX = 0x00008933,
+    /// get ifindex
+    GetIfaceIndex = 0x00008933,
+    /// get hardware address
+    GetIfaceHwAddr = 0x00008927,
+    /// get ipv4 address
+    GetIfaceAddr = 0x00008915,
 }
-
 
 ////////////////////////////////////////////////////////////////////////////////
 //// Implementations
@@ -33,13 +33,13 @@ pub enum IoctlOpcode {
 ////////////////////////////////////////////////////////////////////////////////
 //// Functions
 
-pub fn ioctl(fd: BorrowedFd, op: IoctlOpcode, anydata: Option<&dyn Any>) -> errno::Result<c_int> {
+pub fn ioctl(fd: BorrowedFd, op: IoctlOpcode, anydata: Option<&mut dyn Any>) -> errno::Result<c_int> {
     unsafe {
         let argp = if let Some(any) = anydata {
-            any as *const dyn Any as *const c_void
+            any as *mut dyn Any as *mut c_void
         }
         else {
-            std::ptr::null()
+            std::ptr::null_mut()
         };
 
         let ret =
