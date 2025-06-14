@@ -10,13 +10,14 @@ use std::{
 
 use derive_more::derive::{Deref, DerefMut};
 use ifstructs::ifreq;
+use int_enum::IntEnum;
 use libc::{freeifaddrs, getifaddrs, sockaddr_in, sockaddr_in6};
 use osimodel::datalink::Mac;
 
 use crate::{
     errno::{self, PosixError},
     ioctl::{ioctl, IoctlOpcode},
-    socket::{socket, AddressFamilies, InAddr, SaFamily, SockAddrIn, SocketType},
+    socket::{socket, AddressFamily, InAddr, SaFamily, SockAddrIn, SockAddrLL, SocketType},
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -43,8 +44,9 @@ pub enum IfAddr {
         addr: Ipv6Addr,
         mask: Ipv6Addr,
     },
+    /// Linux Spec `RtnlLinkStats`
     #[cfg(target_os = "linux")]
-    Packet { name: String, stats: RtnlLinkStats },
+    Packet { name: String, ifindex: c_int, addr: Mac, stats: RtnlLinkStats },
 }
 
 #[derive(Default, Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -76,6 +78,27 @@ pub struct RtnlLinkStats {
     rx_compressed: u32,
     tx_compressed: u32,
     rx_nohandler: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct HwAddr {
+    pub ty: HwType,
+    pub addr: Mac
+}
+
+/// Mapping from `ARPHRD_XXX`
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, IntEnum)]
+#[repr(u16)]
+#[non_exhaustive]
+pub enum HwType {
+    Ether = 1,
+    /// Point to Point Protocol
+    PPP = 512,
+    Tunnel = 768,
+    Tunnel6 = 769,
+    Loopback = 772,
+    /// Wi-Fi
+    IEEE80211 = 801,
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -127,9 +150,16 @@ pub fn get_ifaddrtbl() -> errno::Result<IfAddrTbl> {
             }
             else if family == SaFamily::Packet && !(*ifa).ifa_data.is_null()
             {
+                let sockaddr = SockAddrLL::from_raw((*ifa).ifa_addr);
+
+                let ifindex = sockaddr.ifindex;
+                let addr = sockaddr.addr.into();
+
                 IfAddr::Packet {
                     name,
                     stats: *((*ifa).ifa_data as *const RtnlLinkStats),
+                    ifindex,
+                    addr,
                 }
             }
             else {
@@ -155,7 +185,7 @@ pub fn get_ifindex(name: &str) -> errno::Result<c_int> {
     let mut ifr = ifreq(name)?;
 
     let fd = socket(
-        AddressFamilies::INET,
+        AddressFamily::INET,
         SocketType::DGRAM,
         Default::default(),
         Default::default(),
@@ -166,11 +196,11 @@ pub fn get_ifindex(name: &str) -> errno::Result<c_int> {
     Ok(unsafe { ifr.ifr_ifru.ifr_ifindex })
 }
 
-pub fn get_ifmac(name: &str) -> errno::Result<Mac> {
+pub fn get_ifhwaddr(name: &str) -> errno::Result<HwAddr> {
     let mut ifr = ifreq(name)?;
 
     let fd = socket(
-        AddressFamilies::INET,
+        AddressFamily::INET,
         SocketType::DGRAM,
         Default::default(),
         Default::default(),
@@ -178,14 +208,32 @@ pub fn get_ifmac(name: &str) -> errno::Result<Mac> {
 
     ioctl(fd.as_fd(), IoctlOpcode::GetIfaceHwAddr, Some(&mut ifr))?;
 
-    Ok(Mac::from(unsafe { ifr.ifr_ifru.ifr_hwaddr.sa_data }))
+    let ty = HwType::try_from(unsafe { ifr.ifr_ifru.ifr_hwaddr.sa_family }).unwrap();
+    let addr = Mac::from(unsafe { ifr.ifr_ifru.ifr_hwaddr.sa_data });
+
+    Ok(HwAddr { ty, addr })
+}
+
+pub fn get_ifmtu(name: &str) -> errno::Result<c_int> {
+    let mut ifr = ifreq(name)?;
+
+    let fd = socket(
+        AddressFamily::INET,
+        SocketType::DGRAM,
+        Default::default(),
+        Default::default(),
+    )?;
+
+    ioctl(fd.as_fd(), IoctlOpcode::GetIfMTU, Some(&mut ifr))?;
+
+    Ok(unsafe { ifr.ifr_ifru.ifr_mtu })
 }
 
 pub fn get_ifip(name: &str) -> errno::Result<InAddr> {
     let mut ifr = ifreq(name)?;
 
     let fd = socket(
-        AddressFamilies::INET,
+        AddressFamily::INET,
         SocketType::DGRAM,
         Default::default(),
         Default::default(),
@@ -202,68 +250,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_get_addr_tbl() {
+        let tbl = get_ifaddrtbl().unwrap();
+
+        println!("{tbl:#?}");
+    }
+
+    #[test]
     fn test_getifaddrs() {
         let name = "enp3s0";
         println!("{name}:");
-        println!("{}", get_ifmac(name).unwrap());
-        println!("{}", get_ifindex(name).unwrap());
+        println!("{:?}", get_ifhwaddr(name));
+        println!("{:?}", get_ifindex(name));
         println!("{:?}", get_ifip(name));
 
         let name = "lo";
         println!("{name}:");
-        println!("{}", get_ifmac(name).unwrap());
-        println!("{}", get_ifindex(name).unwrap());
-        println!("{}", get_ifip(name).unwrap());
+        println!("{:?}", get_ifhwaddr(name));
+        println!("{:?}", get_ifindex(name));
+        println!("{:?}", get_ifip(name));
 
         let name = "wlp2s0";
         println!("{name}:");
-        println!("{}", get_ifmac(name).unwrap());
-        println!("{}", get_ifindex(name).unwrap());
-        println!("{}", get_ifip(name).unwrap());
-    }
-
-    #[test]
-    fn test_getgateway() {
-        match default_net::get_default_interface() {
-            Ok(default_interface) => {
-                println!("Default Interface");
-                println!("\tIndex: {}", default_interface.index);
-                println!("\tName: {}", default_interface.name);
-                println!(
-                    "\tFriendly Name: {:?}",
-                    default_interface.friendly_name
-                );
-                println!("\tDescription: {:?}", default_interface.description);
-                println!("\tType: {}", default_interface.if_type.name());
-                if let Some(mac_addr) = default_interface.mac_addr {
-                    println!("\tMAC: {}", mac_addr);
-                }
-                else {
-                    println!("\tMAC: (Failed to get mac address)");
-                }
-                println!("\tIPv4: {:?}", default_interface.ipv4);
-                println!("\tIPv6: {:?}", default_interface.ipv6);
-                println!("\tFlags: {:?}", default_interface.flags);
-                println!(
-                    "\tTransmit Speed: {:?}",
-                    default_interface.transmit_speed
-                );
-                println!(
-                    "\tReceive Speed: {:?}",
-                    default_interface.receive_speed
-                );
-                if let Some(gateway) = default_interface.gateway {
-                    println!("Default Gateway");
-                    println!("\tMAC: {}", gateway.mac_addr);
-                    println!("\tIP: {}", gateway.ip_addr);
-                }
-                else {
-                    println!("Default Gateway: (Not found)");
-                }
-            }
-            Err(e) => {
-                println!("{}", e);
-            }
-        }
+        println!("{:?}", get_ifhwaddr(name));
+        println!("{:?}", get_ifindex(name));
+        println!("{:?}", get_ifip(name));
     }
 }

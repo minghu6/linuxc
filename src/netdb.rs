@@ -15,8 +15,7 @@ pub use osimodel::application::http::uri::Scheme;
 use strum::{EnumIter, IntoEnumIterator};
 
 use crate::{
-    errno::{self, PosixError},
-    socket::{SockAddr, SocketProtocol, SocketType},
+    errno::{self, PosixError}, socket::{SockAddr, SocketProtocol, SocketType}
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -34,12 +33,12 @@ pub enum NameOrPort {
 
 #[derive(Debug)]
 pub struct AddrInfo {
-    flags: AIFlags,
-    family: AIFamilies,
-    socktype: SocketType,
-    protocol: SocketProtocol,
-    sockaddr: Option<SockAddr>,
-    canonname: Option<String>,
+    pub flags: AIFlags,
+    pub family: AIFamilies,
+    pub socktype: SocketType,
+    pub protocol: SocketProtocol,
+    pub sockaddr: Option<SockAddr>,
+    pub canonname: Option<String>,
 }
 
 #[derive(Debug, IntEnum)]
@@ -120,6 +119,12 @@ pub enum AddrInfoError {
 ////////////////////////////////////////////////////////////////////////////////
 //// Implementations
 
+impl AddrInfoTbl {
+    pub fn into_iter(self) -> impl Iterator<Item = AddrInfo> {
+        self.0.into_iter()
+    }
+}
+
 impl AddrInfo {
     pub fn request(
         flags: AIFlags,
@@ -149,7 +154,7 @@ impl Into<libc::addrinfo> for AddrInfo {
             ai_addrlen: self
                 .sockaddr
                 .as_ref()
-                .map(|sockaddr| sockaddr.address_len() as _)
+                .map(|sockaddr| sockaddr.address_len())
                 .unwrap_or_default(),
             ai_addr: self
                 .sockaddr
@@ -173,7 +178,7 @@ impl From<&libc::addrinfo> for AddrInfo {
             flags: AIFlags(value.ai_flags),
             family: AIFamilies::try_from(value.ai_family).unwrap(),
             socktype: SocketType::try_from(value.ai_socktype).unwrap(),
-            protocol: SocketProtocol::try_from(value.ai_protocol).unwrap(),
+            protocol: SocketProtocol::from_raw_ip(value.ai_protocol.try_into().unwrap()),
             sockaddr: if value.ai_addr.is_null() {
                 None
             }

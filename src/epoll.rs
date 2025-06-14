@@ -32,22 +32,34 @@ pub struct EpollEvents(i32);
 #[derive_to_bits(i32)]
 #[repr(i32)]
 pub enum EpollFlag {
+    /// IN = RDNORM +  RDBRAND
     In = 0x1,
+    /// 优先级排序​​：EPOLLPRI > EPOLLRDBAND > EPOLL_RDNORM
+    ///
+    /// In Pri
     Pri = 0x2,
     Out = 0x4,
     Err = 0x8,
     Hup = 0x10,
-    Rdnorm = 0x40,
-    Rdbrand = 0x80,
-    Wrnorm = 0x100,
-    Wrband = 0x200,
+    /// Read normal data alias IN
+    RdNorm = 0x40,
+    /// Read brand data
+    RdBrand = 0x80,
+    /// Write norm data
+    WrNorm = 0x100,
+    /// Write brand data
+    WrBand = 0x200,
+    /// Reserved  use
     Msg = 0x400,
-    Rdhup = 0x2000,
+    RdHup = 0x2000,
+    /// Exclusive Wakeup
     Exclusive = 0x1000_0000,
+    /// ​​强制保持唤醒状态​​, 避免休眠中断事件处理
     Wakeup = 0x2000_0000,
+    /// 确保事件仅触发一次, 不适用于监听套接字（需反复注册）
     Oneshot = 0x4000_0000,
     /// 符号溢出但不影响
-    Et = 0x8000_0000u32 as i32,
+    ET = 0x8000_0000u32 as i32,
 }
 
 /// unsafe structure
@@ -97,11 +109,12 @@ impl Epoll {
         Ok(())
     }
 
+    /// timeout:  ms
     pub fn pwait<'a>(
         &self,
         events: &'a mut [EpollEvent],
         timeout: c_int,
-        sigmask: SignalSet,
+        sigmask: Option<SignalSet>,
     ) -> errno::Result<&'a [EpollEvent]> {
         epoll_pwait(self.epfd.as_fd(), events, timeout, sigmask)
     }
@@ -150,6 +163,20 @@ impl PartialEq<EpollFlag> for &EpollEvent {
 impl PartialOrd<EpollFlag> for &EpollEvent {
     fn partial_cmp(&self, other: &EpollFlag) -> Option<std::cmp::Ordering> {
         self.events.partial_cmp(other)
+    }
+}
+
+impl BitOr for EpollFlag {
+    type Output = EpollEvents;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        EpollEvents(self.to_bits() | rhs.to_bits())
+    }
+}
+
+impl Into<EpollEvents> for EpollFlag {
+    fn into(self) -> EpollEvents {
+        EpollEvents(self.to_bits())
     }
 }
 
@@ -256,19 +283,19 @@ impl EpollEvents {
     }
 
     pub fn epoll_rdnorm(self) -> Self {
-        self | EpollFlag::Rdnorm
+        self | EpollFlag::RdNorm
     }
 
     pub fn epoll_rdbrand(self) -> Self {
-        self | EpollFlag::Rdbrand
+        self | EpollFlag::RdBrand
     }
 
     pub fn epoll_wrnorm(self) -> Self {
-        self | EpollFlag::Wrnorm
+        self | EpollFlag::WrNorm
     }
 
     pub fn epoll_wrbrand(self) -> Self {
-        self | EpollFlag::Wrband
+        self | EpollFlag::WrBand
     }
 
     pub fn epoll_msg(self) -> Self {
@@ -276,7 +303,7 @@ impl EpollEvents {
     }
 
     pub fn epoll_rdhup(self) -> Self {
-        self | EpollFlag::Rdhup
+        self | EpollFlag::RdHup
     }
 
     pub fn epoll_exclusive(self) -> Self {
@@ -290,7 +317,7 @@ impl EpollEvents {
         self | EpollFlag::Oneshot
     }
     pub fn epoll_et(self) -> Self {
-        self | EpollFlag::Et
+        self | EpollFlag::ET
     }
 }
 
@@ -315,7 +342,7 @@ pub fn epoll_pwait<'a>(
     epfd: BorrowedFd,
     events: &'a mut [EpollEvent],
     timeout: c_int,
-    sigmask: SignalSet,
+    sigmask: Option<SignalSet>,
 ) -> errno::Result<&'a [EpollEvent]> {
     let ret = unsafe {
         libc::epoll_pwait(
@@ -323,7 +350,7 @@ pub fn epoll_pwait<'a>(
             events.as_mut_ptr() as *mut epoll_event,
             events.len() as c_int,
             timeout,
-            sigmask.as_ptr(),
+            sigmask.as_ref().map(|sigmask| sigmask.as_ptr()).unwrap_or_default(),
         )
     };
 
@@ -333,3 +360,4 @@ pub fn epoll_pwait<'a>(
 
     Ok(&events[..ret as usize])
 }
+

@@ -1,25 +1,35 @@
 //! Socket Address Family
 
 use std::{
-    error::Error, ffi::{c_int, c_void}, fmt::Debug, mem::{transmute, transmute_copy}, net::{Ipv4Addr, Ipv6Addr}, ops::{BitAnd, BitOr}, os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd}, ptr
+    ffi::{c_int, c_void},
+    fmt::Debug,
+    mem::{transmute, transmute_copy},
+    net::{Ipv4Addr, Ipv6Addr},
+    ops::{BitAnd, BitOr},
+    os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd},
+    ptr,
 };
 
-use derive_more::derive::Deref;
+use derive_more::derive::{Deref, DerefMut};
 use int_enum::IntEnum;
 use libc::{
-    SOCK_CLOEXEC, SOCK_NONBLOCK, in_addr, sa_family_t, size_t, sockaddr,
-    sockaddr_in, socklen_t,
+    SOCK_CLOEXEC, SOCK_NONBLOCK, in_addr, pid_t, sa_family_t, size_t,
+    sockaddr, sockaddr_in, socklen_t,
 };
 use m6tobytes::{derive_from_bits, derive_to_bits};
 use osimodel::{
-    datalink::{EthType, EthTypeSpec, Mac},
-    network::{ip, IPv4Addr},
+    be::{U16Be, U32Be},
+    datalink::{EthType, Mac, arp::HType},
+    network::{
+        IPv4Addr,
+        ip::ProtocolKind,
+    },
 };
 use strum::EnumIter;
 
 use crate::{
-    be::{EthTypeBe, HTypeBe, U16Be, U32Be},
-    errno,
+    errno::{self, PosixError},
+    ether::EthTypeSpec,
 };
 
 
@@ -71,7 +81,7 @@ pub enum PktType {
     Kernel = 7,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 #[repr(C)]
 #[non_exhaustive]
 pub enum SockAddr {
@@ -79,6 +89,8 @@ pub enum SockAddr {
     Inet6(SockAddrIn6),
     Unix(SockAddrUn),
     Packet(SockAddrLL),
+    #[cfg(target_os = "linux")]
+    Netlink(SockAddrNL),
 }
 
 /// Synonym libc::sockaddr_in
@@ -110,7 +122,7 @@ pub struct SockAddrIn6 {
 #[derive(Default, Clone, Copy, Eq, PartialEq, Hash, Deref)]
 pub struct InAddr6([u8; 16]);
 
-#[derive(Debug, Eq, PartialEq, Hash)]
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
 #[repr(C)]
 pub struct SockAddrUn {
     pub family: SaFamily,
@@ -119,16 +131,16 @@ pub struct SockAddrUn {
 
 ///
 /// Socket Address Link Layer (sockaddr_ll)
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct SockAddrLL {
     /// unsigned short be
     pub family: SaFamily,
     /// unsigned short be
-    pub protocol: EthTypeBe,
+    pub protocol: EthType,
     /// native order
     pub ifindex: i32,
-    pub hatype: HTypeBe,
+    pub hatype: HType,
     pub pkttype: PktType,
     /// size of address size (for Mac is 6)
     pub halen: u8,
@@ -136,7 +148,24 @@ pub struct SockAddrLL {
     pub addr: PhyAddr,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C)]
+pub struct SockAddrNL {
+    pub family: SaNlFamily,
+    pub _padding: u16,
+    pub portid: pid_t,
+    /// Multicast groups mask
+    pub groups: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(i32)]
+pub enum SaNlFamily {
+    #[default]
+    NetlinkRoute = 16,
+}
+
+#[derive(Debug, Clone, Copy, Deref, DerefMut)]
 #[repr(transparent)]
 pub struct PhyAddr([u8; 8]);
 
@@ -144,7 +173,7 @@ pub struct PhyAddr([u8; 8]);
 ///
 #[derive(Debug, IntEnum)]
 #[repr(i32)]
-pub enum AddressFamilies {
+pub enum AddressFamily {
     UNSPEC = 0,
     /// = LOCAL
     UNIX = 1,
@@ -215,11 +244,18 @@ pub struct ExtraBehavior {
     pub close_on_exec: bool,
 }
 
+///
+/// Mapping Linux constant `ETH_P_XX`, these raw constant values exist overlap
+///
+/// and also convert to native or netword oder depend on context.
+///
 #[derive(Clone, Copy, Debug)]
 pub enum SocketProtocol {
-    IP(ip::ProtocolSpec),
+    IP(ProtocolKind),
     Eth(EthTypeSpec),
     Zero,
+    /// 0
+    NetlinkRoute
 }
 
 #[derive(Debug, EnumIter, PartialEq, Eq, Hash)]
@@ -245,7 +281,7 @@ pub enum Msg {
     CLOEXEC = 0x40000000,
 }
 
-#[derive(Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Default, PartialEq, Eq, Hash, Clone, Copy)]
 #[derive_to_bits(i32)]
 #[repr(transparent)]
 pub struct Flags(i32);
@@ -270,38 +306,59 @@ impl BitAnd<Msg> for &Flags {
 }
 
 impl SocketProtocol {
+    /// to raw protocol value:
+    ///
+    /// Transport Layer: keep native order (TCP, UDP)
+    ///
+    /// IP Layer: big endian (network order) (IP, ARP)
+    ///
     pub fn to_protocol(&self) -> c_int {
         use SocketProtocol::*;
 
         match self {
             IP(protocol_spec) => protocol_spec.to_bits() as _,
-            Eth(eth_type_spec) => {
-                EthTypeBe::new(*eth_type_spec).to_bits() as _
-            }
-            Zero => 0,
+            Eth(eth_type_spec) => eth_type_spec.to_bits().to_be() as _,
+            Zero | NetlinkRoute => 0,
         }
+    }
+
+    pub fn from_raw_ip(value: u8) -> Self {
+        Self::IP(ProtocolKind::from(value))
     }
 }
 
-impl TryFrom<c_int> for SocketProtocol {
-    type Error = Box<dyn Error>;
+impl From<EthTypeSpec> for SocketProtocol {
+    fn from(value: EthTypeSpec) -> Self {
+        Self::Eth(value)
+    }
+}
 
-    fn try_from(value: c_int) -> Result<Self, Self::Error> {
-        Ok(if value == 0 {
-            Self::Zero
-        }
-        else if value <= u8::MAX as c_int {
-            Self::IP(unsafe { ip::Protocol::from_bits(value as u8).into() } )
-        }
-        else {
-            Self::Eth(unsafe { EthType::from_bits(value as u16).into() })
-        })
+impl From<ProtocolKind> for SocketProtocol {
+    fn from(value: ProtocolKind) -> Self {
+        Self::IP(value)
     }
 }
 
 impl Default for SocketProtocol {
     fn default() -> Self {
         Self::Zero
+    }
+}
+
+impl SockAddrIn {
+    pub unsafe fn from_raw(raw: *const sockaddr) -> Self {
+        unsafe { core::ptr::read(raw as *const Self) }
+    }
+}
+
+impl From<Ipv4Addr> for SockAddrIn {
+    fn from(value: Ipv4Addr) -> Self {
+        Self {
+            family: SaFamily::Inet,
+            port: 0.into(),
+            addr: value.into(),
+            padding: Default::default(),
+        }
     }
 }
 
@@ -317,7 +374,17 @@ impl From<sockaddr_in> for SockAddrIn {
     }
 }
 
+impl Into<SockAddr> for SockAddrIn {
+    fn into(self) -> SockAddr {
+        SockAddr::Inet(self)
+    }
+}
+
 impl ExtraBehavior {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     pub fn non_block(mut self) -> Self {
         self.non_block = true;
         self
@@ -368,6 +435,42 @@ impl SockAddrUn {
     }
 }
 
+impl Into<SockAddr> for SockAddrUn {
+    fn into(self) -> SockAddr {
+        SockAddr::Unix(self)
+    }
+}
+
+impl SockAddrIn6 {
+    pub unsafe fn from_raw(raw: *const sockaddr) -> Self {
+        unsafe { core::ptr::read(raw as *const Self) }
+    }
+}
+
+impl Into<SockAddr> for SockAddrIn6 {
+    fn into(self) -> SockAddr {
+        SockAddr::Inet6(self)
+    }
+}
+
+impl SockAddrLL {
+    pub unsafe fn from_raw(raw: *const sockaddr) -> Self {
+        unsafe { core::ptr::read(raw as *const Self) }
+    }
+}
+
+impl Into<SockAddr> for SockAddrLL {
+    fn into(self) -> SockAddr {
+        SockAddr::Packet(self)
+    }
+}
+
+impl Into<SockAddr> for SockAddrNL {
+    fn into(self) -> SockAddr {
+        SockAddr::Netlink(self)
+    }
+}
+
 impl SockAddr {
     pub fn address(&self) -> sockaddr {
         use SockAddr::*;
@@ -377,6 +480,8 @@ impl SockAddr {
             Inet6(sock_addr_in6) => unsafe { transmute_copy(sock_addr_in6) },
             Unix(sock_addr_un) => unsafe { transmute_copy(sock_addr_un) },
             Packet(sock_addr_ll) => unsafe { transmute_copy(sock_addr_ll) },
+            #[cfg(target_os = "linux")]
+            Netlink(sock_addr_nl) => unsafe { transmute_copy(sock_addr_nl) },
         }
     }
 
@@ -384,10 +489,12 @@ impl SockAddr {
         use SockAddr::*;
 
         match self {
-            Inet(sock_addr_in) => sock_addr_in as *const SockAddrIn as _ ,
+            Inet(sock_addr_in) => sock_addr_in as *const SockAddrIn as _,
             Inet6(sock_addr_in6) => sock_addr_in6 as *const SockAddrIn6 as _,
             Unix(sock_addr_un) => sock_addr_un as *const SockAddrUn as _,
             Packet(sock_addr_ll) => sock_addr_ll as *const SockAddrLL as _,
+            #[cfg(target_os = "linux")]
+            Netlink(sock_addr_nl) => sock_addr_nl as *const SockAddrNL as _,
         }
     }
 
@@ -395,14 +502,16 @@ impl SockAddr {
         self.as_ptr() as _
     }
 
-    pub fn address_len(&self) -> usize {
+    pub fn address_len(&self) -> socklen_t {
         use SockAddr::*;
 
         match self {
-            Inet(..) => size_of::<SockAddrIn>(),
-            Inet6(..) => size_of::<SockAddrIn6>(),
-            Unix(..) => size_of::<SockAddrUn>(),
-            Packet(..) => size_of::<SockAddrLL>(),
+            Inet(..) => size_of::<SockAddrIn>() as _,
+            Inet6(..) => size_of::<SockAddrIn6>() as _,
+            Unix(..) => size_of::<SockAddrUn>() as _,
+            Packet(..) => size_of::<SockAddrLL>() as _,
+            #[cfg(target_os = "linux")]
+            Netlink(..) => size_of::<SockAddrNL>() as _
         }
     }
 
@@ -420,17 +529,19 @@ impl SockAddr {
             SaFamily::UnSpec => panic!("unsupported type sockaddr"),
             SaFamily::Local => unsafe {
                 assert_eq!(addrlen as usize, size_of::<SockAddrLL>());
-                Self::Packet(ptr::read(sockaddr as *const SockAddrLL))
+                Self::Packet(SockAddrLL::from_raw(sockaddr))
             },
             SaFamily::Inet => unsafe {
                 assert_eq!(addrlen as usize, size_of::<SockAddrIn>());
-                Self::Inet(ptr::read(sockaddr as *const SockAddrIn))
+                Self::Inet(SockAddrIn::from_raw(sockaddr))
             },
             SaFamily::Inet6 => unsafe {
                 assert_eq!(addrlen as usize, size_of::<SockAddrIn6>());
-                Self::Inet6(ptr::read(sockaddr as *const SockAddrIn6))
+                Self::Inet6(SockAddrIn6::from_raw(sockaddr))
             },
-            SaFamily::Packet => Self::Unix(SockAddrUn::from_raw_parts(sockaddr, addrlen))
+            SaFamily::Packet => {
+                Self::Unix(SockAddrUn::from_raw_parts(sockaddr, addrlen))
+            }
         }
     }
 }
@@ -438,6 +549,18 @@ impl SockAddr {
 impl From<Mac> for PhyAddr {
     fn from(value: Mac) -> Self {
         Self(value.into_arr8())
+    }
+}
+
+impl Into<Mac> for PhyAddr {
+    fn into(self) -> Mac {
+        Mac::from_bytes(&self[..6])
+    }
+}
+
+impl InAddr {
+    pub fn to_bits(&self) -> u32 {
+        self.0.to_ne()
     }
 }
 
@@ -461,7 +584,7 @@ impl From<in_addr> for InAddr {
 
 impl From<Ipv4Addr> for InAddr {
     fn from(value: Ipv4Addr) -> Self {
-        Self(U32Be::from_ne(value.to_bits()))
+        Self(U32Be::new(value.to_bits()))
     }
 }
 
@@ -471,15 +594,15 @@ impl From<IPv4Addr> for InAddr {
     }
 }
 
-impl Into<Ipv4Addr> for InAddr {
-    fn into(self) -> Ipv4Addr {
-        Ipv4Addr::from_bits(self.to_ne())
+impl Into<IPv4Addr> for InAddr {
+    fn into(self) -> IPv4Addr {
+        IPv4Addr::from_bits(self.to_bits())
     }
 }
 
-impl Into<IPv4Addr> for InAddr {
-    fn into(self) -> IPv4Addr {
-        IPv4Addr::from_bits(self.to_ne())
+impl Into<Ipv4Addr> for InAddr {
+    fn into(self) -> Ipv4Addr {
+        Ipv4Addr::from_bits(self.to_ne())
     }
 }
 
@@ -499,7 +622,7 @@ impl Debug for InAddr6 {
 //// Functions
 
 pub fn socket(
-    domain: AddressFamilies,
+    domain: AddressFamily,
     socktype: SocketType,
     extra_behavior: ExtraBehavior,
     protocol: SocketProtocol,
@@ -508,7 +631,7 @@ pub fn socket(
         libc::socket(
             Into::<c_int>::into(domain),
             Into::<c_int>::into(socktype) | extra_behavior.to_bits() as c_int,
-            protocol.to_protocol() as c_int,
+            protocol.to_protocol(),
         )
     };
 
@@ -520,28 +643,71 @@ pub fn socket(
     }
 }
 
+pub fn bind(sock: BorrowedFd, addr: SockAddr) -> errno::Result<()> {
+    let ret = unsafe {
+        libc::bind(sock.as_raw_fd(), addr.as_ptr(), addr.address_len())
+    };
+
+    if ret == -1 {
+        Err(errno::last_os_error())?
+    }
+
+    Ok(())
+}
+
 pub fn recvfrom(
     sock: BorrowedFd,
     buf: &mut [u8],
     flags: Flags,
-    addr: SockAddr,
+    mut addr: Option<SockAddr>,
 ) -> errno::Result<size_t> {
+    let mut addrlen = addr.as_ref().map(|addr| addr.address_len());
+
     let ret = unsafe {
         libc::recvfrom(
             sock.as_raw_fd(),
             buf.as_mut_ptr() as *mut c_void,
             buf.len(),
             flags.to_bits() as i32,
-            &mut addr.address() as *mut sockaddr,
-            &mut (addr.address_len() as u32) as *mut socklen_t,
+            addr.as_mut()
+                .map(|addr| addr.as_mut_ptr())
+                .unwrap_or_default(),
+            addrlen
+                .as_mut()
+                .map(|addrlen_mut| core::ptr::from_mut(addrlen_mut))
+                .unwrap_or_default(),
         )
     };
+
+    // for now impl, addrlen is just be ignored since we don't handle this complicated case.
 
     if ret < 0 {
         Err(errno::last_os_error())?
     }
 
     Ok(ret as usize)
+}
+
+/// for non-blocking recvfrom all buf
+pub fn recvfrom_all(
+    sock: BorrowedFd,
+    buf: &mut [u8],
+    flags: Flags,
+    addr: Option<SockAddr>,
+) -> errno::Result<size_t> {
+    let mut cnt = 0;
+
+    loop {
+        match recvfrom(sock, &mut buf[cnt..], flags, addr) {
+            Ok(0) => break,
+            Ok(n) => cnt += n,
+            Err(ref err) if matches!(err, PosixError::EAGAIN) => break,
+            Err(ref err) if matches!(err, PosixError::EINTR) => continue,
+            Err(err) => Err(err)?,
+        }
+    }
+
+    Ok(cnt)
 }
 
 pub fn recv(
@@ -565,6 +731,26 @@ pub fn recv(
     Ok(ret as usize)
 }
 
+pub fn recv_all(
+    sock: BorrowedFd,
+    buf: &mut [u8],
+    flags: Flags,
+) -> errno::Result<size_t> {
+    let mut cnt = 0;
+
+    loop {
+        match recv(sock, &mut buf[cnt..], flags) {
+            Ok(0) => break,
+            Ok(n) => cnt += n,
+            Err(ref err) if matches!(err, PosixError::EAGAIN) => break,
+            Err(ref err) if matches!(err, PosixError::EINTR) => continue,
+            Err(err) => Err(err)?,
+        }
+    }
+
+    Ok(cnt)
+}
+
 pub fn sendto(
     sock: BorrowedFd,
     msg: &[u8],
@@ -577,8 +763,8 @@ pub fn sendto(
             msg.as_ptr() as *const c_void,
             msg.len(),
             flags.to_bits() as i32,
-            &addr.address() as *const sockaddr,
-            addr.address_len() as socklen_t,
+            addr.as_ptr(),
+            addr.address_len(),
         )
     };
 
@@ -587,6 +773,26 @@ pub fn sendto(
     }
 
     Ok(ret as usize)
+}
+
+/// for non-blocking senfto all buf
+pub fn sendto_all(
+    sock: BorrowedFd,
+    msg: &[u8],
+    flags: Flags,
+    addr: SockAddr,
+) -> errno::Result<size_t> {
+    let mut cnt = 0;
+
+    loop {
+        cnt += sendto(sock, &msg[cnt..], flags, addr)?;
+
+        if cnt >= msg.len() {
+            break;
+        }
+    }
+
+    Ok(cnt)
 }
 
 pub fn send(
@@ -608,4 +814,22 @@ pub fn send(
     }
 
     Ok(ret as usize)
+}
+
+pub fn send_all(
+    sock: BorrowedFd,
+    msg: &[u8],
+    flags: Flags,
+) -> errno::Result<size_t> {
+    let mut cnt = 0;
+
+    loop {
+        cnt += send(sock, &msg[cnt..], flags)?;
+
+        if cnt >= msg.len() {
+            break;
+        }
+    }
+
+    Ok(cnt)
 }

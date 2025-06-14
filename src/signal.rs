@@ -1,11 +1,15 @@
+use std::{
+    fmt::Debug,
+    mem::zeroed,
+    ops::{BitAnd, BitOr},
+};
 
-use std::{fmt::Debug, mem::zeroed, ops::BitAnd};
-
-use libc::{sigset_t};
-use m6tobytes::derive_to_bits;
+use int_enum::IntEnum;
+use libc::sigset_t;
+use m6tobytes::{derive_from_bits, derive_to_bits};
 use strum::{EnumIter, IntoEnumIterator};
 
-use crate::errno;
+use crate::errno::{self, PosixError};
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -16,8 +20,9 @@ use crate::errno;
 //// Structures
 
 
-#[derive(Debug, EnumIter, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, EnumIter, Clone, Copy, PartialEq, Eq, Hash, IntEnum)]
 #[derive_to_bits(i32)]
+#[derive_from_bits(i32)]
 #[repr(i32)]
 pub enum Signal {
     /// mordern os merged into with SIGIOT
@@ -97,34 +102,72 @@ pub enum Signal {
     SIGXFSZ = 25,
     /// Window resize signal (4.3BSD, Sun)
     #[cfg(all(target_env = "gnu", target_arch = "x86_64"))]
-    SIGWINCH = 28
+    SIGWINCH = 28,
 }
 
 #[derive(PartialEq, Eq, Clone, Copy, Hash)]
 #[repr(transparent)]
 pub struct SignalSet(sigset_t);
 
+#[derive(Debug, IntEnum, Default, Clone, Copy)]
+#[repr(i32)]
+pub enum SigMaskHow {
+    #[default]
+    BLOCK = 0,
+    UNBLOCK = 1,
+    SETMASK = 2,
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 //// Functions
 
+impl BitOr<Signal> for Signal {
+    type Output = SignalSet;
+
+    fn bitor(self, rhs: Signal) -> Self::Output {
+        let mut set = SignalSet::empty();
+
+        set.insert(self);
+        set.insert(rhs);
+
+        set
+    }
+}
+
+impl Into<SignalSet> for Signal {
+    fn into(self) -> SignalSet {
+        SignalSet::empty() | self
+    }
+}
 
 impl SignalSet {
     pub fn as_ptr(&self) -> *const sigset_t {
         &self.0 as *const sigset_t
     }
 
+    pub fn as_mut_ptr(&mut self) -> *mut sigset_t {
+        &mut self.0 as *mut sigset_t
+    }
+
     pub fn empty() -> Self {
         let mut sigset: sigset_t = unsafe { zeroed() };
 
-        let ret = unsafe {
-            libc::sigemptyset(&mut sigset as *mut sigset_t)
-        };
+        let ret = unsafe { libc::sigemptyset(&mut sigset as *mut sigset_t) };
 
         if ret != 0 {
             panic!("{:?}", errno::last_os_error());
         }
 
         Self(sigset)
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        unsafe {
+            std::mem::transmute::<sigset_t, [u8; size_of::<sigset_t>()]>(
+                self.0,
+            )
+        }
+        .is_empty()
     }
 
     pub fn is_member(&self, sig: Signal) -> bool {
@@ -164,6 +207,17 @@ impl SignalSet {
         }
     }
 
+    pub fn wait(&self) -> Signal {
+        let mut sig = 0;
+
+        let ret = unsafe { libc::sigwait(self.as_ptr(), &mut sig as _) };
+
+        if ret != 0 {
+            panic!("EINVAL {self:?}");
+        }
+
+        Signal::try_from(sig).unwrap()
+    }
 }
 
 impl BitAnd<Signal> for &SignalSet {
@@ -174,6 +228,14 @@ impl BitAnd<Signal> for &SignalSet {
     }
 }
 
+impl BitOr<Signal> for SignalSet {
+    type Output = Self;
+
+    fn bitor(mut self, rhs: Signal) -> Self::Output {
+        self.insert(rhs);
+        self
+    }
+}
 
 impl Debug for SignalSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -187,4 +249,35 @@ impl Debug for SignalSet {
 
         Ok(())
     }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//// Functions
+
+/// return old sigmask
+pub fn pthread_sigmask(
+    how: SigMaskHow,
+    set: SignalSet,
+) -> errno::Result<SignalSet> {
+    let mut oldset = SignalSet::empty();
+
+    let ret = unsafe {
+        libc::pthread_sigmask(how.into(), set.as_ptr(), oldset.as_mut_ptr())
+    };
+
+    if ret != 0 {
+        Err(PosixError::try_from(ret).unwrap())?
+    }
+
+    Ok(oldset)
+}
+
+pub fn raise(
+    sig: Signal,
+) -> bool {
+    let ret = unsafe {
+        libc::raise(sig.into())
+    };
+
+    ret == 0
 }

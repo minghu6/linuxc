@@ -1,15 +1,15 @@
+use std::{
+    any::Any,
+    ffi::{ c_void, c_int },
+    os::fd::{AsRawFd, BorrowedFd},
+};
+
 ////////////////////////////////////////////////////////////////////////////////
 //// Constants
 
 
 ////////////////////////////////////////////////////////////////////////////////
 //// Structures
-
-use std::{
-    any::Any,
-    ffi::{ c_void, c_int },
-    os::fd::{AsRawFd, BorrowedFd},
-};
 
 use int_enum::IntEnum;
 
@@ -25,6 +25,9 @@ pub enum IoctlOpcode {
     GetIfaceHwAddr = 0x00008927,
     /// get ipv4 address
     GetIfaceAddr = 0x00008915,
+    /// get ethernet MTU
+    GetIfMTU = 0x00008921,
+    
 }
 
 ////////////////////////////////////////////////////////////////////////////////
