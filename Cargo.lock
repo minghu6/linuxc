@@ -499,7 +499,7 @@ dependencies = [
  "int-enum",
  "ioctl-sys",
  "libc",
- "m6ptr",
+ "m6io",
  "m6tobytes",
  "netlink-packet-route",
  "nonempty",
@@ -533,10 +533,6 @@ dependencies = [
 
 [[package]]
 name = "m6parsing"
-version = "0.1.0"
-
-[[package]]
-name = "m6ptr"
 version = "0.1.0"
 
 [[package]]

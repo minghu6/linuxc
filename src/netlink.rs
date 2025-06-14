@@ -9,7 +9,7 @@ use std::{
 
 use int_enum::IntEnum;
 use libc::size_t;
-use m6ptr::{AlignedRawBufRef, RawBufRef};
+use m6io::rawbuf::{AlignedRawBufRef, RawBufRef};
 use m6tobytes::derive_to_bits;
 use osimodel::network::ip::ToS;
 use strum::EnumIter;
