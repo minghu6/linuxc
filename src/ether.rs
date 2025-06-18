@@ -14,7 +14,7 @@ use osimodel::datalink::{ EthProto, EthType};
 #[derive_to_bits(u16)]
 #[repr(u16)]
 #[non_exhaustive]
-pub enum EthTypeSpec {
+pub enum EthTypeKind {
     ALL = 0x0003,
 
     IPv4 = 0x0800,
@@ -25,23 +25,23 @@ pub enum EthTypeSpec {
 ////////////////////////////////////////////////////////////////////////////////
 //// Implementations
 
-impl EthTypeSpec {
+impl EthTypeKind {
     pub fn into_proto(self) -> EthProto {
         let ety: EthType = self.into();
         ety.into()
     }
 }
 
-impl Into<EthType> for EthTypeSpec {
+impl Into<EthType> for EthTypeKind {
     fn into(self) -> EthType {
         unsafe { EthType::new_unchecked(self.to_bits()) }
     }
 }
 
-impl TryFrom<EthType> for EthTypeSpec {
+impl TryFrom<EthType> for EthTypeKind {
     type Error = u16;
 
     fn try_from(value: EthType) -> Result<Self, Self::Error> {
-        EthTypeSpec::try_from(value.to_ne())
+        EthTypeKind::try_from(value.to_ne())
     }
 }

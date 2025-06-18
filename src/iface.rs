@@ -2,8 +2,10 @@
 //!
 
 use std::{
-    ffi::{ CStr, c_int },
+    ffi::{CStr, c_int},
+    fmt::Debug,
     net::{Ipv4Addr, Ipv6Addr},
+    ops::BitAnd,
     os::fd::AsFd,
     ptr::null_mut,
 };
@@ -12,12 +14,17 @@ use derive_more::derive::{Deref, DerefMut};
 use ifstructs::ifreq;
 use int_enum::IntEnum;
 use libc::{freeifaddrs, getifaddrs, sockaddr_in, sockaddr_in6};
+use m6tobytes::derive_to_bits;
 use osimodel::datalink::Mac;
+use strum::{EnumIter, IntoEnumIterator};
 
 use crate::{
     errno::{self, PosixError},
-    ioctl::{ioctl, IoctlOpcode},
-    socket::{socket, AddressFamily, InAddr, SaFamily, SockAddrIn, SockAddrLL, SocketType},
+    ioctl::{IoctlOpcode, ioctl},
+    socket::{
+        AddressFamily, InAddr, SaFamily, SockAddrIn, SockAddrLL, SocketType,
+        socket,
+    },
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -38,16 +45,72 @@ pub enum IfAddr {
         name: String,
         addr: Ipv4Addr,
         mask: Ipv4Addr,
+        flags: IfFlags,
     },
     Inet6 {
         name: String,
         addr: Ipv6Addr,
         mask: Ipv6Addr,
+        flags: IfFlags,
     },
     /// Linux Spec `RtnlLinkStats`
     #[cfg(target_os = "linux")]
-    Packet { name: String, ifindex: c_int, addr: Mac, stats: RtnlLinkStats },
+    Packet {
+        name: String,
+        ifindex: c_int,
+        addr: Mac,
+        flags: IfFlags,
+        stats: RtnlLinkStats,
+    },
 }
+
+/// for IFF_XXX (Interface Flag XXX)
+#[derive(Debug, IntEnum, EnumIter, Clone, Copy)]
+#[derive_to_bits(u32)]
+#[repr(u32)]
+pub enum IfFlag {
+    /// Software/admin state (interface enabled)
+    ///
+    /// be independent with `Running`
+    Up = 0x1,
+    Broadcast = 0x2,
+    Debug = 0x4,
+    Loopback = 0x8,
+    PointToPoint = 0x10,
+    /// ​​Trailer encapsulation​​ (or ​​trailer protocols​​) is an ​​obsolete
+    /// network optimization technique​​
+    NoTrailer = 0x20,
+    /// Hardware/physical state (link operational)
+    ///
+    /// be independent with `Up`
+    Running = 0x40,
+    /// Interface doesn't support ARP
+    NoARP = 0x80,
+    /// Interface in promiscuous mode (receives all packets)
+    Promisc = 0x100,
+    /// Forces a network interface to ​​receive all multicast packets​​ on the network segment
+    ///
+    /// Similar to promiscuous mode (IFF_PROMISC) but limited to multicast traffic only.
+    AllMulti = 0x200,
+    #[cfg(target_os = "linux")]
+    Master = 0x400,
+    #[cfg(target_os = "linux")]
+    Slave = 0x800,
+    Multicast = 0x1000,
+    /// Port Selection
+    #[cfg(target_os = "linux")]
+    PortSel = 0x2000,
+    /// Auto media selection active
+    #[cfg(target_os = "linux")]
+    AutoMedia = 0x4000,
+    #[cfg(target_os = "linux")]
+    Dynamic = 0x8000,
+}
+
+#[derive(Clone, Copy)]
+#[derive_to_bits(u32)]
+#[repr(transparent)]
+pub struct IfFlags(u32);
 
 #[derive(Default, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct RtnlLinkStats {
@@ -83,7 +146,7 @@ pub struct RtnlLinkStats {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct HwAddr {
     pub ty: HwType,
-    pub addr: Mac
+    pub addr: Mac,
 }
 
 /// Mapping from `ARPHRD_XXX`
@@ -103,6 +166,46 @@ pub enum HwType {
 
 ////////////////////////////////////////////////////////////////////////////////
 //// Implementations
+
+impl IntoIterator for IfAddrTbl {
+    type Item = IfAddr;
+
+    type IntoIter = impl Iterator<Item = IfAddr>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl BitAnd<IfFlag> for IfFlags {
+    type Output = bool;
+
+    fn bitand(self, rhs: IfFlag) -> Self::Output {
+        self.to_bits() & rhs.to_bits() != 0
+    }
+}
+
+impl BitAnd<IfFlag> for &IfFlags {
+    type Output = bool;
+
+    fn bitand(self, rhs: IfFlag) -> Self::Output {
+        self.clone() & rhs
+    }
+}
+
+impl Debug for IfFlags {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut builder = &mut f.debug_list();
+
+        for flag in IfFlag::iter() {
+            if self & flag {
+                builder = builder.entry(&flag);
+            }
+        }
+
+        builder.finish()
+    }
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 //// Functions
@@ -126,11 +229,20 @@ pub fn get_ifaddrtbl() -> errno::Result<IfAddrTbl> {
             let name =
                 CStr::from_ptr((*ifa).ifa_name).to_str().unwrap().to_owned();
 
+            let flags = IfFlags((*ifa).ifa_flags);
+
             let item = if family == SaFamily::Inet {
                 IfAddr::Inet {
                     name,
-                    addr: InAddr::from((*((*ifa).ifa_addr as *mut sockaddr_in)).sin_addr).into(),
-                    mask: InAddr::from((*((*ifa).ifa_addr as *mut sockaddr_in)).sin_addr).into(),
+                    addr: InAddr::from(
+                        (*((*ifa).ifa_addr as *mut sockaddr_in)).sin_addr,
+                    )
+                    .into(),
+                    mask: InAddr::from(
+                        (*((*ifa).ifa_addr as *mut sockaddr_in)).sin_addr,
+                    )
+                    .into(),
+                    flags,
                 }
             }
             else if family == SaFamily::Inet6 {
@@ -146,6 +258,7 @@ pub fn get_ifaddrtbl() -> errno::Result<IfAddrTbl> {
                             .sin6_addr
                             .s6_addr,
                     ),
+                    flags,
                 }
             }
             else if family == SaFamily::Packet && !(*ifa).ifa_data.is_null()
@@ -160,6 +273,7 @@ pub fn get_ifaddrtbl() -> errno::Result<IfAddrTbl> {
                     stats: *((*ifa).ifa_data as *const RtnlLinkStats),
                     ifindex,
                     addr,
+                    flags,
                 }
             }
             else {
@@ -175,6 +289,32 @@ pub fn get_ifaddrtbl() -> errno::Result<IfAddrTbl> {
 
         Ok(IfAddrTbl(items))
     }
+}
+
+///
+/// It's derivation function of `get_ifaddrtbl`
+///
+pub fn get_available_ipv4_ifname() -> errno::Result<Vec<String>> {
+    get_ifaddrtbl().map(|tbl| {
+        tbl.into_iter()
+            .filter_map(|ifaddr| {
+                if let IfAddr::Inet { name, flags, .. } = ifaddr {
+                    if flags & IfFlag::Up
+                        && flags & IfFlag::Running
+                        && !(flags & IfFlag::Loopback)
+                    {
+                        Some(name)
+                    }
+                    else {
+                        None
+                    }
+                }
+                else {
+                    None
+                }
+            })
+            .collect()
+    })
 }
 
 pub(crate) fn ifreq(name: &str) -> errno::Result<ifreq> {
@@ -208,7 +348,8 @@ pub fn get_ifhwaddr(name: &str) -> errno::Result<HwAddr> {
 
     ioctl(fd.as_fd(), IoctlOpcode::GetIfaceHwAddr, Some(&mut ifr))?;
 
-    let ty = HwType::try_from(unsafe { ifr.ifr_ifru.ifr_hwaddr.sa_family }).unwrap();
+    let ty = HwType::try_from(unsafe { ifr.ifr_ifru.ifr_hwaddr.sa_family })
+        .unwrap();
     let addr = Mac::from(unsafe { ifr.ifr_ifru.ifr_hwaddr.sa_data });
 
     Ok(HwAddr { ty, addr })
@@ -254,6 +395,8 @@ mod tests {
         let tbl = get_ifaddrtbl().unwrap();
 
         println!("{tbl:#?}");
+
+        println!("{:?}", get_available_ipv4_ifname());
     }
 
     #[test]

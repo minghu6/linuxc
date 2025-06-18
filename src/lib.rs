@@ -1,5 +1,6 @@
 #![feature(ip_from)]
 #![feature(addr_parse_ascii)]
+#![feature(impl_trait_in_assoc_type)]
 
 pub mod epoll;
 pub mod errno;

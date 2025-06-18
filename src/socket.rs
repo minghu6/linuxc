@@ -29,7 +29,7 @@ use strum::EnumIter;
 
 use crate::{
     errno::{self, PosixError},
-    ether::EthTypeSpec,
+    ether::EthTypeKind,
 };
 
 
@@ -252,7 +252,7 @@ pub struct ExtraBehavior {
 #[derive(Clone, Copy, Debug)]
 pub enum SocketProtocol {
     IP(ProtocolKind),
-    Eth(EthTypeSpec),
+    Eth(EthTypeKind),
     Zero,
     /// 0
     NetlinkRoute
@@ -327,8 +327,8 @@ impl SocketProtocol {
     }
 }
 
-impl From<EthTypeSpec> for SocketProtocol {
-    fn from(value: EthTypeSpec) -> Self {
+impl From<EthTypeKind> for SocketProtocol {
+    fn from(value: EthTypeKind) -> Self {
         Self::Eth(value)
     }
 }
@@ -755,7 +755,7 @@ pub fn sendto(
     sock: BorrowedFd,
     msg: &[u8],
     flags: Flags,
-    addr: SockAddr,
+    addr: Option<SockAddr>,
 ) -> errno::Result<size_t> {
     let ret = unsafe {
         libc::sendto(
@@ -763,8 +763,8 @@ pub fn sendto(
             msg.as_ptr() as *const c_void,
             msg.len(),
             flags.to_bits() as i32,
-            addr.as_ptr(),
-            addr.address_len(),
+            addr.map(|addr| addr.as_ptr()).unwrap_or_default(),
+            addr.map(|addr| addr.address_len()).unwrap_or_default(),
         )
     };
 
@@ -780,7 +780,7 @@ pub fn sendto_all(
     sock: BorrowedFd,
     msg: &[u8],
     flags: Flags,
-    addr: SockAddr,
+    addr: Option<SockAddr>,
 ) -> errno::Result<size_t> {
     let mut cnt = 0;
 
